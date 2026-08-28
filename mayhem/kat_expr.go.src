@@ -1,0 +1,117 @@
+// mayhem/kat_expr.go.src — the known-answer probe behind mayhem/test.sh. NOT a
+// fuzz target (no Mayhemfile names it).
+//
+// Staged by mayhem/build.sh into _mayhem_harness/expr next to the fuzz harness
+// and the copied pkg/expr sources, and built by the SAME go-118-fuzz-build
+// command (same package, build tags, -gcflags, -trimpath, c-archive mode) and
+// the SAME clang++ link line as /mayhem/fuzz_expr; only -func differs. So the
+// oracle runs exactly the build flavor that is graded: nothing the fuzz build
+// sees (tags, build settings, sanitizer link) differs for the program under test.
+//
+// Input: one case per run, delivered the way the shim delivers the fuzz
+// target's input — a 4-byte big-endian length followed by that many bytes.
+// The payload is "<variables JSON>\n<CEL expression>". Output: exactly one line
+// on stdout, the RESULT only (never a verdict or a tally):
+//
+//	OK <Go type> <value>   decoded, evaluated, and the String()/JSON round trip agrees
+//	DECODE_ERR             (*Expr).DecodeString returned an error
+//	EVAL_ERR               (*Expr).Eval returned an error
+//	BADSPEC                malformed probe input (a test.sh bug)
+//	STRING_MISMATCH / MARSHAL_ERR / UNMARSHAL_ERR / ROUNDTRIP_MISMATCH
+//
+// mayhem/test.sh owns every input and every expected line and does the
+// comparison itself, one probe process per case, so a case that fails, panics
+// or hangs costs only that case.
+package expr
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+)
+
+func FuzzExprKAT(f *testing.F) {
+	f.Fuzz(func(t *testing.T, spec string) {
+		fmt.Fprintln(os.Stdout, katEval(spec))
+	})
+}
+
+func katEval(spec string) string {
+	varsJSON, code, ok := strings.Cut(spec, "\n")
+	if !ok {
+		return "BADSPEC"
+	}
+	vars, err := katVars(varsJSON)
+	if err != nil {
+		return "BADSPEC"
+	}
+
+	var e Expr
+	if err := e.DecodeString(code); err != nil {
+		return "DECODE_ERR"
+	}
+	v, err := e.Eval(vars)
+	if err != nil {
+		return "EVAL_ERR"
+	}
+	got := fmt.Sprintf("OK %T %v", v, v)
+
+	// The rest of the package's public surface: String/Expr echo the source,
+	// and a MarshalJSON -> UnmarshalJSON round trip (which re-runs
+	// DecodeString) evaluates to the same value.
+	if e.String() != code || e.Expr() != code {
+		return "STRING_MISMATCH"
+	}
+	b, err := e.MarshalJSON()
+	if err != nil {
+		return "MARSHAL_ERR"
+	}
+	var e2 Expr
+	if err := e2.UnmarshalJSON(b); err != nil {
+		return "UNMARSHAL_ERR"
+	}
+	v2, err := e2.Eval(vars)
+	if err != nil || fmt.Sprintf("OK %T %v", v2, v2) != got {
+		return "ROUNDTRIP_MISMATCH"
+	}
+	return got
+}
+
+// katVars decodes the variables object; JSON integers become int64 (CEL int)
+// and other numbers float64 (CEL double), so the expected values are exact.
+func katVars(s string) (map[string]any, error) {
+	d := json.NewDecoder(strings.NewReader(s))
+	d.UseNumber()
+	var raw map[string]any
+	if err := d.Decode(&raw); err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		raw = map[string]any{}
+	}
+	return katNorm(raw).(map[string]any), nil
+}
+
+func katNorm(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, e := range x {
+			x[k] = katNorm(e)
+		}
+		return x
+	case []any:
+		for i, e := range x {
+			x[i] = katNorm(e)
+		}
+		return x
+	case json.Number:
+		if i, err := x.Int64(); err == nil {
+			return i
+		}
+		fv, _ := x.Float64()
+		return fv
+	}
+	return v
+}

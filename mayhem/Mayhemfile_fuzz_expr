@@ -1,0 +1,12 @@
+project: savantenvs/dapr
+target: fuzz_expr
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/fuzz_expr/testsuite
+# Hangs are bounded by the runner, never by the harness: `timeout:` is the
+# per-exec limit (seconds). Corpus inputs finish in well under 1 s locally;
+# 5 s leaves room for slower training hosts.
+cmds:
+  - cmd: /mayhem/fuzz_expr
+    libfuzzer: true
+    timeout: 5

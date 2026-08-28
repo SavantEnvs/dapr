@@ -1,0 +1,49 @@
+// mayhem/harness_expr.go.src — native testing.F harness for dapr's CEL
+// expression PARSER (the fuzz surface). Staged by mayhem/build.sh into a fresh,
+// single-package directory (_mayhem_harness/expr) that also holds a copy of
+// pkg/expr's NON-test sources, so go-118-fuzz-build can build it WITHOUT the
+// upstream pkg/expr dir's expr_test.go (which is `package expr_test`, pulls in
+// testify, and ships a testing.B BenchmarkEval that breaks go-118-fuzz-build's
+// package loader).
+//
+// Declared `package expr` (the directory's package) so it reaches the CEL
+// compile path directly — go-118-fuzz-build rewrites this into an ordinary
+// non-test .go file. Mirrors cncf-fuzzing's FuzzExprDecodeString for dapr.
+//
+// Input encoding: go-118-fuzz-build's testing shim fills the `code string`
+// argument through go-fuzz-headers, i.e. a 4-byte big-endian length followed
+// by that many bytes of expression text; shorter inputs never reach the parser.
+// The seeds in mayhem/fuzz_expr/testsuite are encoded that way. f.Add is a
+// no-op under the shim (it only seeds a native `go test -fuzz` run).
+//
+// No file I/O, no timers, no recover(): every input goes straight to
+// (*Expr).DecodeString(); its error is the expected outcome for most inputs and
+// is ignored (Go fuzz idiom — the shim has no reject channel). A panic or a
+// hang is a finding; Mayhem owns the per-input timeout.
+package expr
+
+import (
+	"testing"
+)
+
+// FuzzExprDecodeString drives (*Expr).DecodeString — the CEL environment
+// build + Compile + Program path for dapr scope/routing expressions.
+func FuzzExprDecodeString(f *testing.F) {
+	seeds := []string{
+		"1 + 2", "2 * 3", "10 - 4", "15 / 3", "(2 + 3) * 4",
+		`"foo" + "bar"`, "true && false", "1 == 1", "1 != 2",
+		"has(input.test)", "input.test == 1234",
+		"(has(input.test) && input.test == 1234) || (has(result.test) && result.test == 5678)",
+		"size([1, 2, 3])", "'a' in ['a', 'b']", "1 in [1, 2]",
+		"", "   ", "0", "-1", "1.5 + 2.5",
+		"foo.bar.baz", "a + b + c", `size("abc")`, "@", "((((", "1 +",
+	}
+	for _, seed := range seeds {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, code string) {
+		var e Expr
+		_ = e.DecodeString(code)
+	})
+}
